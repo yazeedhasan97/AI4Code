@@ -16,8 +16,6 @@ from scipy import sparse
 
 # visiualize progress
 from tqdm import tqdm
-from tqdm import notebook
-notebook.tqdm.pandas()
 tqdm.pandas()
 
 # validation results
@@ -25,16 +23,18 @@ from bisect import bisect
 import functools, time
 from gensim.parsing.preprocessing import remove_stopwords
 
-
 import multiprocessing as mp
 import swifter
-
-from sklearn.preprocessing import LabelBinarizer
-from sklearn.preprocessing import MinMaxScaler
 
 import nltk
 from nltk.stem.wordnet import WordNetLemmatizer
 from nltk.stem.porter import PorterStemmer
+
+try:
+    nltk.download('wordnet')
+    nltk.download('omw-1.4')
+except:
+    print("Could't donlowd requaired text data")
 
 lemmatizer = WordNetLemmatizer()
 stemmer = PorterStemmer()
@@ -238,7 +238,7 @@ def read_all_notebooks_(path, count, pr_count, desc='Train NBs'):
         .sort_index(level='id', sort_remaining=False)
     )
     print(df.info())
-    return df.reset_index()
+    return df#.reset_index()
 
 def get_ranks_(base, derived):
     return [base.index(d) for d in derived]
@@ -262,3 +262,39 @@ def unique_words_frequances(data):
     return (data.str.split()).swifter.apply(lambda x: pd.value_counts(x)).sum(axis = 0)
 
 #############################################################################################################################################################
+
+
+def generate_triplet(df, mode='train', size=1000, drop = 0.85, combiner=0.5):
+    triplets = []
+    ids = df.id.unique()
+    random_drop = np.random.random(size=size) > drop
+    count = 0
+    for idx, df_tmp in tqdm(df.groupby('id')):
+        mk_df = df_tmp[df_tmp['cell_type'] == 'markdown']
+        cd_df = df_tmp[df_tmp['cell_type'] == 'code']
+        
+        for idxx, mrow in mk_df.iterrows():
+            labels = np.array([(r == (mrow['rank'] + combiner)) for r in cd_df['rank']]).astype('int')
+            for crow, label in zip(cd_df.iterrows(), labels):
+                if label == 1:
+                    triplets.append([
+                        mrow['cell_id'], 
+                        crow[-1]['cell_id'], 
+                        label
+                    ])
+                elif mode == 'test':
+                    triplets.append([
+                        mrow['cell_id'], 
+                        crow[-1]['cell_id'], 
+                        label
+                    ])
+                elif random_drop[count % size]:
+                    triplets.append([
+                        mrow['cell_id'], 
+                        crow[-1]['cell_id'], 
+                        label
+                    ])
+                count += 1
+        
+
+    return triplets

@@ -1,0 +1,13 @@
+*.csv
+*.txt
+*.json
+*.pt
+*.h5
+*.zip
+*.rar
+*.whl
+*.tar
+__pycatch__/
+.ipynb_checkpoints/
+pt_models/
+__pycache__/

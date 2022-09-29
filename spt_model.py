@@ -18,66 +18,54 @@ import math
 np.random.seed(42)
 
 
-class BDataset(Dataset):
-    def __init__(self, df, max_len, bert_model_name, total_max_len, drop=[], catch_path=None):
-        super().__init__()
-        self.df = df.reset_index().drop(drop, axis=1)
-        self.max_len = max_len
-        self.total_max_len = total_max_len
-        
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            bert_model_name, 
-            # do_lower_case=True,
-            strip_accents=True,
-            wordpieces_prefix=None,
-            use_fast=True,
-            cache_dir=catch_path
-        )    
-        
-    def __getitem__(self, index):
-        row = self.df.iloc[index]
-        
-        inputs = self.tokenizer.encode_plus(
-            row.source,
-            None,
-            add_special_tokens=True,
-            max_length=self.max_len,
-            padding="max_length",
-            return_token_type_ids=True,
-            truncation=True
-        )
-        
-        ids = inputs['input_ids']
-        ids = ids[:self.total_max_len]
-        if len(ids) != self.total_max_len:
-            ids = ids + [self.tokenizer.pad_token_id, ] * (self.total_max_len - len(ids))
-        
-        mask = inputs['attention_mask']
-       
-        mask = mask[:self.total_max_len]
-        if len(mask) != self.total_max_len:
-            mask = mask + [self.tokenizer.pad_token_id, ] * (self.total_max_len - len(mask))
-        
-        generated = torch.FloatTensor([
-            row.n_markdown_cells, 
-            row.n_code_cells,
-            row.words_count * 0.001,
-            row.letters_count * 0.001,
-            row.empty_lines_count,
-            row.comment_lines_count,
-            row.full_lines_count,
-            row.text_lines_count,
-            row.tag_lines_count,
-        ])
-        
-        assert len(ids) == self.total_max_len
-        
-        return ( torch.LongTensor(ids), torch.LongTensor(mask), generated, torch.FloatTensor([row['rank']]), )
+class EarlyStopping:
+    """Early stops the training if validation loss doesn't improve after a given patience."""
+    def __init__(self, patience=2, verbose=False, delta=0, path='pt_models/checkpoint.pt', trace_func=print):
+        """
+        Args:
+            patience (int): How long to wait after last time validation loss improved.
+                            Default: 7
+            verbose (bool): If True, prints a message for each validation loss improvement. 
+                            Default: False
+            delta (float): Minimum change in the monitored quantity to qualify as an improvement.
+                            Default: 0
+            path (str): Path for the checkpoint to be saved to.
+                            Default: 'checkpoint.pt'
+            trace_func (function): trace print function.
+                            Default: print            
+        """
+        self.patience = patience
+        self.verbose = verbose
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+        self.val_loss_min = np.Inf
+        self.delta = delta
+        self.path = path
+        self.trace_func = trace_func
+    def __call__(self, val_loss, model):
 
-    def __len__(self):
-        return self.df.shape[0]
+        score = -val_loss
 
+        if self.best_score is None:
+            self.best_score = score
+            self.save_checkpoint(val_loss, model)
+        elif score < self.best_score + self.delta:
+            self.counter += 1
+            self.trace_func(f'EarlyStopping counter: {self.counter} out of {self.patience}')
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_score = score
+            self.save_checkpoint(val_loss, model)
+            self.counter = 0
 
+    def save_checkpoint(self, val_loss, model):
+        '''Saves model when validation loss decrease.'''
+        if self.verbose:
+            self.trace_func(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).  Saving model ...')
+        torch.save(model.state_dict(), self.path)
+        self.val_loss_min = val_loss
 
 
 class BModel(nn.Module):
@@ -224,7 +212,7 @@ class BModel(nn.Module):
         x = torch.nn.functional.leaky_relu(self.top1(torch.cat([x, gants], 1)), 0.00001)
         
         x = self.top2(x)
-        return x
+        return torch.sigmoid(x)
     
     def dilate(self, x, dilation, init_dilation=1, pad_start=True):
         """
@@ -314,7 +302,79 @@ def constant_pad_1d(input, target_size, dimension=0, value=0, pad_start=False):
     return ConstantPad1d.apply(input, target_size, dimension, value, pad_start)
 
     
+class BDataset(Dataset):
+    def __init__(self, df, triplts, max_len, bert_model_name, total_max_len, drop=[], catch_path=None):
+        super().__init__()
+        self.df = df.reset_index().drop(drop, axis=1)
+        self.max_len = max_len
+        self.total_max_len = total_max_len
+        self.triplts=triplts
+        
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            bert_model_name, 
+            do_lower_case=True,
+            strip_accents=True,
+            wordpieces_prefix=None,
+            use_fast=True,
+            cache_dir=catch_path
+        )    
+        
+    def __getitem__(self, index):
+        row = self.df.iloc[index]
+        items = self.triplts[index]
+        label = items[-1]
+        # print('items', items)
+        
+        c_row = self.df[self.df['cell_id'] == items[1]].values[0]
+        m_row = self.df[self.df['cell_id'] == items[0]].values[0]
+        print('c_row: ', c_row)
+        print('m_row: ', m_row)
+        
+        
+        inputs = self.tokenizer.encode_plus(
+            m_row[2],
+            None,
+            add_special_tokens=True,
+            max_length=int(self.max_len * 0.65), # MARKDOWN cells perform better with lower max length
+            padding="max_length",
+            return_token_type_ids=True,
+            truncation=True
+        )
+        
+        code_inputs = self.tokenizer.batch_encode_plus(
+            [str(x) for x in c_row[2]] , 
+            add_special_tokens=True,
+            max_length=self.max_len,
+            padding="max_length",
+            truncation=True
+        )
+        
+        ids = inputs['input_ids']
+        for x in code_inputs['input_ids']:
+            ids.extend(x[:-1])
+        ids = ids[:self.total_max_len]
+        if len(ids) != self.total_max_len:
+            ids = ids + [self.tokenizer.pad_token_id, ] * (self.total_max_len - len(ids))
+        
+        mask = inputs['attention_mask']
+        for x in code_inputs['attention_mask']:
+            mask.extend(x[:-1])
+        mask = mask[:self.total_max_len]
+        if len(mask) != self.total_max_len:
+            mask = mask + [self.tokenizer.pad_token_id, ] * (self.total_max_len - len(mask))
+        
+        generated = torch.FloatTensor([
+            *c_row[3:],
+            *m_row[3:],
+        ])
+        
+        assert len(ids) == self.total_max_len
+        
+        return torch.LongTensor(ids), torch.LongTensor(mask), generated, label,  #torch.FloatTensor([row['rank']]),
 
+    def __len__(self):
+        # return self.df.shape[0]
+        return len(self.triplts)
     
 def adjust_lr(optimizer, epoch):
     if epoch < 2:
@@ -406,6 +466,12 @@ def train(model, train_loader, val_loader, epochs=1, patience=2, accumulation_st
         for idx, data in enumerate(tbar):
             inputs, target = read_data(data)
             
+            
+            if idx % accumulation_steps == 0 or idx == len(tbar) - 1:
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.step()
+                
             with torch.cuda.amp.autocast():
                 # pred = model(*inputs)
                 pred = model(inputs)
@@ -414,10 +480,7 @@ def train(model, train_loader, val_loader, epochs=1, patience=2, accumulation_st
             scaler.scale(loss).backward()
             
             if idx % accumulation_steps == 0 or idx == len(tbar) - 1:
-                scaler.step(optimizer)
-                scaler.update()
                 optimizer.zero_grad()
-                optimizer.step()
                 # scheduler.step()
             
             
@@ -484,54 +547,3 @@ def predict(
     )
     _, y_test = validate(model, data_loader)
     return y_test
-
-
-
-class EarlyStopping:
-    """Early stops the training if validation loss doesn't improve after a given patience."""
-    def __init__(self, patience=2, verbose=False, delta=0, path='pt_models/checkpoint.pt', trace_func=print):
-        """
-        Args:
-            patience (int): How long to wait after last time validation loss improved.
-                            Default: 7
-            verbose (bool): If True, prints a message for each validation loss improvement. 
-                            Default: False
-            delta (float): Minimum change in the monitored quantity to qualify as an improvement.
-                            Default: 0
-            path (str): Path for the checkpoint to be saved to.
-                            Default: 'checkpoint.pt'
-            trace_func (function): trace print function.
-                            Default: print            
-        """
-        self.patience = patience
-        self.verbose = verbose
-        self.counter = 0
-        self.best_score = None
-        self.early_stop = False
-        self.val_loss_min = np.Inf
-        self.delta = delta
-        self.path = path
-        self.trace_func = trace_func
-    def __call__(self, val_loss, model):
-
-        score = -val_loss
-
-        if self.best_score is None:
-            self.best_score = score
-            self.save_checkpoint(val_loss, model)
-        elif score < self.best_score + self.delta:
-            self.counter += 1
-            self.trace_func(f'EarlyStopping counter: {self.counter} out of {self.patience}')
-            if self.counter >= self.patience:
-                self.early_stop = True
-        else:
-            self.best_score = score
-            self.save_checkpoint(val_loss, model)
-            self.counter = 0
-
-    def save_checkpoint(self, val_loss, model):
-        '''Saves model when validation loss decrease.'''
-        if self.verbose:
-            self.trace_func(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).  Saving model ...')
-        torch.save(model.state_dict(), self.path)
-        self.val_loss_min = val_loss
